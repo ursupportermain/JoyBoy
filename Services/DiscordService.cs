@@ -1,42 +1,66 @@
+using System.Reflection;
 using Discord;
+using Discord.Interactions;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
-
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace JoyBoy.Services;
 
-    public class DiscordService
+public class DiscordService : BackgroundService
+{
+    private readonly IConfiguration _configuration;
+    private readonly DiscordSocketClient _discordSocketClient;
+    private readonly InteractionService _interactionService;
+    private readonly IServiceProvider _serviceProvider;
+    private IGuild? _primaryGuild;
+
+    public DiscordService(
+        IConfiguration configuration,
+        DiscordSocketClient discordSocketClient,
+        InteractionService interactionService,
+        IServiceProvider serviceProvider)
     {
-        private readonly DiscordSocketClient _client;
-        private readonly string _token;
-
-        public DiscordService(IConfiguration configuration)
-        {
-            _client = new DiscordSocketClient();
-            _client.Log += Log;
-            _client.Ready += OnReadyAsync;
-
-            _token = configuration["BotToken"] ?? throw new Exception("BotToken is missing in appsettings.json.");
-        }
-
-        public async Task StartAsync()
-        {
-            await _client.LoginAsync(TokenType.Bot, _token);
-            await _client.StartAsync();
-            Console.WriteLine("Discord bot started.");
-
-            await Task.Delay(-1); 
-        }
-
-        private Task Log(LogMessage log)
-        {
-            Console.WriteLine(log);
-            return Task.CompletedTask;
-        }
-
-        private Task OnReadyAsync()
-        {
-            Console.WriteLine($"Bot connected as {_client.CurrentUser.Username}#{_client.CurrentUser.Discriminator}");
-            return Task.CompletedTask;
-        }
+        _configuration = configuration;
+        _discordSocketClient = discordSocketClient;
+        _interactionService = interactionService;
+        _serviceProvider = serviceProvider;
     }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        await _interactionService.AddModulesAsync(Assembly.GetEntryAssembly(), scope.ServiceProvider);
+
+        _discordSocketClient.Ready += ReadyAsync;
+        _discordSocketClient.SlashCommandExecuted += SlashCommandExecutedAsync;
+
+        await _discordSocketClient.LoginAsync(TokenType.Bot, _configuration["Discord:Token"]);
+        await _discordSocketClient.StartAsync();
+
+        stoppingToken.Register(async () =>
+        {
+            await _discordSocketClient.StopAsync();
+        });
+    }
+
+    private async Task SlashCommandExecutedAsync(SocketSlashCommand command)
+    {
+        var socketInteractionContext = new SocketInteractionContext(_discordSocketClient, command);
+        await _interactionService.ExecuteCommandAsync(socketInteractionContext, _serviceProvider);
+    }
+
+    private async Task ReadyAsync()
+    {
+        if (_primaryGuild != null)
+            return;
+
+        _primaryGuild = _discordSocketClient.Guilds.FirstOrDefault(x => x.Name == "");
+
+        if (_primaryGuild == null)
+            return;
+
+        await _interactionService.RegisterCommandsToGuildAsync(_primaryGuild.Id);
+    }
+}
