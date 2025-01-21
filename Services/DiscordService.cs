@@ -8,47 +8,58 @@ using Microsoft.Extensions.Hosting;
 
 namespace JoyBoy.Services;
 
-public class DiscordService : BackgroundService
+public class DiscordService(
+    IConfiguration configuration,
+    DiscordSocketClient discordSocketClient,
+    IServiceProvider serviceProvider)
+    : BackgroundService
 {
-    private readonly IConfiguration _configuration;
-    private readonly DiscordSocketClient _discordSocketClient;
-    private readonly InteractionService _interactionService;
-    private readonly IServiceProvider _serviceProvider;
+    private readonly InteractionService _interactionService = new InteractionService(discordSocketClient, new InteractionServiceConfig());
     private IGuild? _primaryGuild;
-
-    public DiscordService(
-        IConfiguration configuration,
-        DiscordSocketClient discordSocketClient,
-        InteractionService interactionService,
-        IServiceProvider serviceProvider)
-    {
-        _configuration = configuration;
-        _discordSocketClient = discordSocketClient;
-        _interactionService = interactionService;
-        _serviceProvider = serviceProvider;
-    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var scope = _serviceProvider.CreateScope();
+        using var scope = serviceProvider.CreateScope();
         await _interactionService.AddModulesAsync(Assembly.GetEntryAssembly(), scope.ServiceProvider);
 
-        _discordSocketClient.Ready += ReadyAsync;
-        _discordSocketClient.SlashCommandExecuted += SlashCommandExecutedAsync;
+        discordSocketClient.Ready += ReadyAsync;
+        discordSocketClient.SlashCommandExecuted += SlashCommandExecutedAsync;
 
-        await _discordSocketClient.LoginAsync(TokenType.Bot, _configuration["Discord:Token"]);
-        await _discordSocketClient.StartAsync();
+        try
+        {
+            var token = configuration["Discord:Token"];
+            if (string.IsNullOrEmpty(token))
+            {
+                throw new InvalidOperationException("Bot token is missing from configuration.");
+            }
+
+            await discordSocketClient.LoginAsync(TokenType.Bot, token);
+            await discordSocketClient.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"An error occurred while starting Discord client: {ex.Message}");
+            throw;
+        }
 
         stoppingToken.Register(async () =>
         {
-            await _discordSocketClient.StopAsync();
+            await discordSocketClient.StopAsync();
         });
     }
 
     private async Task SlashCommandExecutedAsync(SocketSlashCommand command)
     {
-        var socketInteractionContext = new SocketInteractionContext(_discordSocketClient, command);
-        await _interactionService.ExecuteCommandAsync(socketInteractionContext, _serviceProvider);
+        var socketInteractionContext = new SocketInteractionContext(discordSocketClient, command);
+        try
+        {
+            await _interactionService.ExecuteCommandAsync(socketInteractionContext, serviceProvider);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error executing slash command: {ex.Message}");
+            await command.RespondAsync("An error occurred while executing the command.", ephemeral: true);
+        }
     }
 
     private async Task ReadyAsync()
@@ -56,11 +67,21 @@ public class DiscordService : BackgroundService
         if (_primaryGuild != null)
             return;
 
-        _primaryGuild = _discordSocketClient.Guilds.FirstOrDefault(x => x.Name == "");
+        _primaryGuild = discordSocketClient.Guilds.FirstOrDefault(x => x.Name == "IT11a");
 
         if (_primaryGuild == null)
+        {
+            Console.WriteLine("Primary guild not found.");
             return;
+        }
 
-        await _interactionService.RegisterCommandsToGuildAsync(_primaryGuild.Id);
+        try
+        {
+            await _interactionService.RegisterCommandsToGuildAsync(_primaryGuild.Id);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error registering commands to guild: {ex.Message}");
+        }
     }
 }
